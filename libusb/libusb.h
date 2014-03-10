@@ -1948,6 +1948,14 @@ int LIBUSB_CALL libusb_hotplug_register_callback(libusb_context *ctx,
 void LIBUSB_CALL libusb_hotplug_deregister_callback(libusb_context *ctx,
 						libusb_hotplug_callback_handle handle);
 
+#ifdef _WIN32
+void LIBUSB_CALL libusb_get_handles_to_wait_on(struct libusb_context *ctx,
+                                               HANDLE **handles_to_wait_on,
+                                               int *nb_handles_to_wait_on);
+
+void LIBUSB_CALL libusb_free_handles_to_wait_on(HANDLE *handles_to_wait_on);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

@@ -499,6 +499,101 @@ struct winfd overlapped_to_winfd(OVERLAPPED* overlapped)
 	return INVALID_WINFD;
 }
 
+/* Get a list of HANDLE
+*/
+void API_EXPORTED libusb_get_handles_to_wait_on(struct libusb_context *ctx, HANDLE **handles_to_wait_on_ret, int *nb_handles_to_wait_on)
+{
+        int _index;
+        HANDLE *handles_to_wait_on = 0;
+        struct usbi_pollfd *ipollfd;
+        POLL_NFDS_TYPE nfds = 0;
+
+        CHECK_INIT_POLLING;
+
+        *nb_handles_to_wait_on = 0;
+
+        usbi_mutex_lock(&ctx->pollfds_lock);
+        list_for_each_entry(ipollfd, &ctx->pollfds, list, struct usbi_pollfd)
+	        nfds++;
+
+	if (nfds != 0) {
+                handles_to_wait_on = (HANDLE*) calloc(nfds+1, sizeof(HANDLE));	// +1 for fd_update
+                if (handles_to_wait_on == NULL) {
+	                errno = ENOMEM;
+                        goto libusb_get_handles_to_wait_on_exit;
+	        }
+
+        }
+	else {
+                goto libusb_get_handles_to_wait_on_exit;
+	}
+
+	list_for_each_entry(ipollfd, &ctx->pollfds, list, struct usbi_pollfd) {
+		struct libusb_pollfd *pollfd_current = &ipollfd->pollfd;
+
+		// Only one of POLLIN or POLLOUT can be selected with this version of poll (not both)
+		if ((pollfd_current->events & ~POLLIN) && (!(pollfd_current->events & POLLOUT))) {
+			errno = EACCES;
+			usbi_warn(NULL, "unsupported set of events");
+                        *nb_handles_to_wait_on = -1;
+			goto libusb_get_handles_to_wait_on_exit;
+		}
+
+		_index = _fd_to_index_and_lock(pollfd_current->fd);
+		poll_dbg("fd=%d: (overlapped=%p) got events %04X", poll_fd[_index].fd, poll_fd[_index].overlapped, pollfd_current->events);
+
+		if ( (_index < 0) || (poll_fd[_index].handle == INVALID_HANDLE_VALUE)
+		  || (poll_fd[_index].handle == 0) || (poll_fd[_index].overlapped == NULL)) {
+			errno = EBADF;
+			if (_index >= 0) {
+                          LeaveCriticalSection(&_poll_fd[_index].mutex);
+			}
+			usbi_warn(NULL, "invalid fd");
+                        *nb_handles_to_wait_on = -1;
+			goto libusb_get_handles_to_wait_on_exit;
+		}
+
+		// IN or OUT must match our fd direction
+		if ((pollfd_current->events & POLLIN) && (poll_fd[_index].rw != RW_READ)) {
+			errno = EBADF;
+			usbi_warn(NULL, "attempted POLLIN on fd without READ access");
+			LeaveCriticalSection(&_poll_fd[_index].mutex);
+                        *nb_handles_to_wait_on = -1;
+			goto libusb_get_handles_to_wait_on_exit;
+		}
+
+		if ((pollfd_current->events & POLLOUT) && (poll_fd[_index].rw != RW_WRITE)) {
+			errno = EBADF;
+			usbi_warn(NULL, "attempted POLLOUT on fd without WRITE access");
+			LeaveCriticalSection(&_poll_fd[_index].mutex);
+                        *nb_handles_to_wait_on = -1;
+			goto libusb_get_handles_to_wait_on_exit;
+		}
+
+		// The following macro only works if overlapped I/O was reported pending
+		if ( (HasOverlappedIoCompleted(poll_fd[_index].overlapped))
+		  || (HasOverlappedIoCompletedSync(poll_fd[_index].overlapped)) ) {
+			poll_dbg("  completed");
+			// checks above should ensure this works:
+		} else {
+                        handles_to_wait_on[*nb_handles_to_wait_on] = poll_fd[_index].overlapped->hEvent;
+			(*nb_handles_to_wait_on)++;
+		}
+		LeaveCriticalSection(&_poll_fd[_index].mutex);
+	}
+
+
+libusb_get_handles_to_wait_on_exit:
+     usbi_mutex_unlock(&ctx->pollfds_lock);
+     *handles_to_wait_on_ret = handles_to_wait_on;
+}
+
+void API_EXPORTED libusb_free_handles_to_wait_on(HANDLE *handles_to_wait_on) {
+
+  if (handles_to_wait_on)
+    free(handles_to_wait_on);
+}
+
 /*
  * POSIX poll equivalent, using Windows OVERLAPPED
  * Currently, this function only accepts one of POLLIN or POLLOUT per fd
